@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="it"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>__TITLE__</title>
+<style>
+:root{
+  --wall:#efe7dc; --wall-dot:#e2d8ca; --bar:#f6f5f3; --bar-fg:#1b2a26;
+  --bubble:#ffffff; --fg:#1b2420; --muted:#6b7a74; --chip:#fffaf0; --chip-fg:#55625c;
+  --sys:#fdf3c4; --sys-fg:#5b5230; --line:#d9d2c6; --accent:#0f8a6c;
+  --n1:#c2410c; --n2:#1d6fb8; --n3:#9333b5; --n4:#0f766e; --n5:#be185d; --n6:#a16207;
+  --font:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root{
+  --wall:#0c1513; --wall-dot:#14201d; --bar:#17221f; --bar-fg:#e6ece9;
+  --bubble:#1f2c29; --fg:#e8eeeb; --muted:#8fa29b; --chip:#1a2623; --chip-fg:#a9b8b2;
+  --sys:#2a2716; --sys-fg:#e3d79c; --line:#25332f; --accent:#3fcf9f;
+  --n1:#fb923c; --n2:#60a5fa; --n3:#d08cf0; --n4:#2dd4bf; --n5:#f472b6; --n6:#facc15; color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--wall);color:var(--fg);font-family:var(--font);font-size:15px;line-height:1.4}
+.wrap{max-width:720px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;
+  background-image:radial-gradient(var(--wall-dot) 1.2px,transparent 1.3px);background-size:18px 18px}
+header{position:sticky;top:0;z-index:2;background:var(--bar);color:var(--bar-fg);border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:12px;padding:10px 16px}
+.avatar{width:42px;height:42px;border-radius:50%;background:var(--accent);color:var(--bar);display:grid;place-items:center;font-weight:700;flex:none}
+.hd{min-width:0} .hd h1{margin:0;font-size:16px}
+.hd p{margin:0;font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+main{flex:1;display:flex;flex-direction:column;gap:3px;padding:14px 16px 28px}
+.chip{align-self:center;background:var(--chip);color:var(--chip-fg);font-size:12.5px;font-weight:600;padding:5px 12px;border-radius:8px;margin:6px 0;box-shadow:0 1px 0 var(--line)}
+.sys{align-self:center;background:var(--sys);color:var(--sys-fg);font-size:12.5px;padding:6px 12px;border-radius:8px;text-align:center;max-width:90%;margin-bottom:8px}
+.msg{align-self:flex-start;max-width:min(80%,520px);background:var(--bubble);border-radius:10px;padding:6px 9px 7px;box-shadow:0 1px .5px rgba(0,0,0,.13);position:relative;min-width:0}
+.msg.first{border-top-left-radius:0;margin-top:8px}
+.msg.first::before{content:"";position:absolute;left:-7px;top:0;border-top:9px solid var(--bubble);border-left:8px solid transparent}
+.who{font-size:13px;font-weight:700;margin-bottom:1px}
+.txt{overflow-wrap:anywhere}
+.meta{float:right;margin:6px 0 -4px 12px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.meta span{opacity:.75}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;justify-content:center;font-size:12.5px;color:var(--muted);margin-top:14px}
+</style></head><body>
+<div class="wrap">
+  <header><div class="avatar" id="av"></div><div class="hd"><h1 id="title"></h1><p id="members"></p></div></header>
+  <main id="chat"></main>
+</div>
+<script>
+const D = __DATA__;
+const START = D.start ? Date.parse(D.start) : null;
+const hm = ms => new Date(ms).toLocaleTimeString("it-IT",{hour:"2-digit",minute:"2-digit"});
+const hms = ms => new Date(ms).toLocaleTimeString("it-IT",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+const off = s => { s = Math.floor(s); const h = Math.floor(s/3600), m = Math.floor(s/60)%60, x = String(s%60).padStart(2,"0");
+  return h ? `${h}:${String(m).padStart(2,"0")}:${x}` : `${m}:${x}`; };
+const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+
+document.getElementById("title").textContent = D.title;
+document.getElementById("av").textContent = D.title.replace(/[^\p{L}\p{N}]/gu,"").slice(0,3).toUpperCase();
+document.getElementById("members").textContent = Object.keys(D.people).join(", ");
+const chat = document.getElementById("chat");
+if (START) {
+  chat.append(el("div","chip", new Date(START).toLocaleDateString("it-IT",{day:"numeric",month:"long",year:"numeric"})));
+  chat.append(el("div","sys", `Registrazione avviata alle ${hms(START)} · ${D.msgs.length} messaggi trascritti`));
+}
+let prev = null, lastT = -1e9;
+for (const m of D.msgs) {
+  const first = m.who !== prev || m.t - lastT > 300;
+  const b = el("div","msg" + (first ? " first" : ""));
+  if (first) { const w = el("div","who", m.who); w.style.color = `var(${D.people[m.who]})`; b.append(w); }
+  const meta = el("span","meta");
+  if (START) meta.append(el("span", null, off(m.t) + " · "), hm(START + m.t*1000)); else meta.append(off(m.t));
+  const t = el("div","txt"); t.append(meta, document.createTextNode(m.text));
+  b.append(t); chat.append(b); prev = m.who; lastT = m.t;
+}
+const counts = {}; D.msgs.forEach(m => counts[m.who] = (counts[m.who]||0) + 1);
+const lg = el("div","legend");
+for (const [p,c] of Object.entries(D.people)) { const s = el("span"); const n = el("b", null, p); n.style.color = `var(${c})`; s.append(n, ` ${counts[p]||0} msg`); lg.append(s); }
+chat.append(lg);
+</script></body></html>

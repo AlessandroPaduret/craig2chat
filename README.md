@@ -28,10 +28,10 @@ Su Arch/CachyOS: `sudo pacman -S uv ffmpeg`. Su Debian/Ubuntu: `sudo apt install
 
 ```sh
 git clone https://github.com/AlessandroPaduret/craig2chat.git
-ln -s "$PWD/craig2chat/craig2chat" ~/.local/bin/craig2chat
+ln -s "$PWD/craig2chat/craig2chat.py" ~/.local/bin/craig2chat
 ```
 
-(`~/.local/bin` deve essere nel `PATH`.) In alternativa lancialo direttamente con `./craig2chat`.
+(`~/.local/bin` deve essere nel `PATH`.) In alternativa lancialo direttamente con `./craig2chat.py`. Lo script cerca `template.html` nella sua stessa cartella, anche quando lo chiami tramite il collegamento.
 
 ## Uso
 
@@ -70,7 +70,9 @@ craig2chat craig-abc123.zip --model medium --rename kilo123b=Kilo --skip musicbo
 5. **Bolle.** Frasi consecutive della stessa persona a meno di 2 secondi di distanza finiscono nella stessa bolla.
 6. **Orari.** L'ora di inizio viene letta da `info.txt` di Craig. Ogni messaggio mostra il minuto della registrazione e l'ora reale (nel fuso orario del computer).
 
-Le due soglie (`PAUSE` e `GAP`) sono costanti in cima allo script, se vuoi bolle più corte o più lunghe.
+Le due soglie (`PAUSE` e `GAP`) sono costanti in cima a `craig2chat.py`, se vuoi bolle più corte o più lunghe.
+
+L'aspetto della chat sta in `template.html`: puoi modificarlo liberamente, basta lasciare i segnaposto `__TITLE__` (titolo della pagina) e `__DATA__` (dove lo script inserisce i messaggi in JSON).
 
 ## Velocità
 
