@@ -1,0 +1,258 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10,<3.13"
+# dependencies = ["faster-whisper"]
+# ///
+"""craig2chat — trascrive una registrazione Craig (una traccia per persona)
+e la trasforma in una chat in stile WhatsApp (chat.html + chat.txt).
+
+Uso:
+  craig2chat CARTELLA_O_ZIP [-o USCITA] [--model large-v3] [--lang it]
+             [--rename vecchio=Nuovo ...] [--skip nome ...]
+"""
+import argparse, datetime as dt, html, json, os, re, subprocess, sys, tempfile, zipfile
+
+AUDIO_EXT = {".aac", ".flac", ".ogg", ".oga", ".opus", ".m4a", ".wav", ".mp3", ".wma"}
+GAP = 2.0    # secondi di pausa oltre i quali si apre una nuova bolla
+PAUSE = 0.8  # secondi di pausa che chiudono una frase
+
+
+def load_audio(path):
+    import numpy as np
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-ac", "1", "-ar", "16000", "-f", "f32le", "-"],
+        capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.float32)
+
+
+def read_info(folder):
+    info = {"start": None, "title": os.path.basename(os.path.abspath(folder))}
+    p = os.path.join(folder, "info.txt")
+    if not os.path.exists(p):
+        return info
+    txt = open(p, encoding="utf-8", errors="replace").read()
+    m = re.search(r"Start time:\s*(\S+)", txt)
+    if m:
+        info["start"] = dt.datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+    g = re.search(r"Guild:\s*(.+?)\s*\(", txt)
+    c = re.search(r"Channel:\s*(.+?)\s*\(", txt)
+    if g:
+        info["title"] = g.group(1) + (f" · #{c.group(1)}" if c else "")
+    return info
+
+
+def speaker_name(filename):
+    name = os.path.splitext(os.path.basename(filename))[0]
+    return re.sub(r"^\d+-", "", name)
+
+
+def transcribe(files, model_name, lang, threads):
+    from faster_whisper import WhisperModel
+    model = WhisperModel(model_name, device="auto", compute_type="int8", cpu_threads=threads)
+    words = []
+    for f, who in files:
+        print(f"  trascrivo {who} …", file=sys.stderr, flush=True)
+        segs, _ = model.transcribe(load_audio(f), language=lang, vad_filter=True,
+                                   word_timestamps=True, beam_size=5)
+        n = 0
+        for s in segs:
+            for w in s.words or []:
+                if w.word.strip():
+                    words.append({"who": who, "start": w.start, "end": w.end, "w": w.word})
+                    n += 1
+        print(f"    {n} parole", file=sys.stderr)
+    return words
+
+
+def sentences(words):
+    """Taglia le parole di un parlante in frasi: a fine frase o dopo una pausa."""
+    out = []
+    for w in words:
+        cur = out[-1] if out else None
+        if cur and not cur["closed"] and w["start"] - cur["end"] <= PAUSE:
+            cur["text"] += w["w"]
+            cur["end"] = w["end"]
+        else:
+            cur = {"who": w["who"], "t": w["start"], "end": w["end"], "text": w["w"]}
+            out.append(cur)
+        cur["closed"] = w["w"].rstrip().endswith((".", "!", "?", "…"))
+    return out
+
+
+def build_messages(words):
+    """Intreccia le frasi di tutti in ordine di tempo e unisce quelle vicine dello stesso parlante."""
+    units = []
+    for who in dict.fromkeys(w["who"] for w in words):
+        units += sentences([w for w in words if w["who"] == who])
+    units.sort(key=lambda u: u["t"])
+    msgs = []
+    for u in units:
+        last = msgs[-1] if msgs else None
+        if last and last["who"] == u["who"] and u["t"] - last["end"] <= GAP:
+            last["text"] += u["text"]
+            last["end"] = u["end"]
+        else:
+            msgs.append({"who": u["who"], "t": round(u["t"], 2), "end": u["end"], "text": u["text"]})
+    for m in msgs:
+        t = m["text"].strip()
+        m["text"] = t[:1].upper() + t[1:]
+        del m["end"]
+    return msgs
+
+
+def fmt_offset(s):
+    s = int(s)
+    return f"{s // 3600}:{s // 60 % 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
+
+
+def write_txt(path, info, msgs):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"{info['title']}\n\n")
+        for m in msgs:
+            when = fmt_offset(m["t"])
+            if info["start"]:
+                when = (info["start"] + dt.timedelta(seconds=m["t"])).astimezone().strftime("%H:%M:%S")
+            f.write(f"[{when}] {m['who']}: {m['text']}\n")
+
+
+PALETTE = ["--n1", "--n2", "--n3", "--n4", "--n5", "--n6"]
+
+TEMPLATE = r"""<!doctype html>
+<html lang="it"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>__TITLE__</title>
+<style>
+:root{
+  --wall:#efe7dc; --wall-dot:#e2d8ca; --bar:#f6f5f3; --bar-fg:#1b2a26;
+  --bubble:#ffffff; --fg:#1b2420; --muted:#6b7a74; --chip:#fffaf0; --chip-fg:#55625c;
+  --sys:#fdf3c4; --sys-fg:#5b5230; --line:#d9d2c6; --accent:#0f8a6c;
+  --n1:#c2410c; --n2:#1d6fb8; --n3:#9333b5; --n4:#0f766e; --n5:#be185d; --n6:#a16207;
+  --font:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root{
+  --wall:#0c1513; --wall-dot:#14201d; --bar:#17221f; --bar-fg:#e6ece9;
+  --bubble:#1f2c29; --fg:#e8eeeb; --muted:#8fa29b; --chip:#1a2623; --chip-fg:#a9b8b2;
+  --sys:#2a2716; --sys-fg:#e3d79c; --line:#25332f; --accent:#3fcf9f;
+  --n1:#fb923c; --n2:#60a5fa; --n3:#d08cf0; --n4:#2dd4bf; --n5:#f472b6; --n6:#facc15; color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--wall);color:var(--fg);font-family:var(--font);font-size:15px;line-height:1.4}
+.wrap{max-width:720px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;
+  background-image:radial-gradient(var(--wall-dot) 1.2px,transparent 1.3px);background-size:18px 18px}
+header{position:sticky;top:0;z-index:2;background:var(--bar);color:var(--bar-fg);border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:12px;padding:10px 16px}
+.avatar{width:42px;height:42px;border-radius:50%;background:var(--accent);color:var(--bar);display:grid;place-items:center;font-weight:700;flex:none}
+.hd{min-width:0} .hd h1{margin:0;font-size:16px}
+.hd p{margin:0;font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+main{flex:1;display:flex;flex-direction:column;gap:3px;padding:14px 16px 28px}
+.chip{align-self:center;background:var(--chip);color:var(--chip-fg);font-size:12.5px;font-weight:600;padding:5px 12px;border-radius:8px;margin:6px 0;box-shadow:0 1px 0 var(--line)}
+.sys{align-self:center;background:var(--sys);color:var(--sys-fg);font-size:12.5px;padding:6px 12px;border-radius:8px;text-align:center;max-width:90%;margin-bottom:8px}
+.msg{align-self:flex-start;max-width:min(80%,520px);background:var(--bubble);border-radius:10px;padding:6px 9px 7px;box-shadow:0 1px .5px rgba(0,0,0,.13);position:relative;min-width:0}
+.msg.first{border-top-left-radius:0;margin-top:8px}
+.msg.first::before{content:"";position:absolute;left:-7px;top:0;border-top:9px solid var(--bubble);border-left:8px solid transparent}
+.who{font-size:13px;font-weight:700;margin-bottom:1px}
+.txt{overflow-wrap:anywhere}
+.meta{float:right;margin:6px 0 -4px 12px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.meta span{opacity:.75}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;justify-content:center;font-size:12.5px;color:var(--muted);margin-top:14px}
+</style></head><body>
+<div class="wrap">
+  <header><div class="avatar" id="av"></div><div class="hd"><h1 id="title"></h1><p id="members"></p></div></header>
+  <main id="chat"></main>
+</div>
+<script>
+const D = __DATA__;
+const START = D.start ? Date.parse(D.start) : null;
+const hm = ms => new Date(ms).toLocaleTimeString("it-IT",{hour:"2-digit",minute:"2-digit"});
+const hms = ms => new Date(ms).toLocaleTimeString("it-IT",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+const off = s => { s = Math.floor(s); const h = Math.floor(s/3600), m = Math.floor(s/60)%60, x = String(s%60).padStart(2,"0");
+  return h ? `${h}:${String(m).padStart(2,"0")}:${x}` : `${m}:${x}`; };
+const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+
+document.getElementById("title").textContent = D.title;
+document.getElementById("av").textContent = D.title.replace(/[^\p{L}\p{N}]/gu,"").slice(0,3).toUpperCase();
+document.getElementById("members").textContent = Object.keys(D.people).join(", ");
+const chat = document.getElementById("chat");
+if (START) {
+  chat.append(el("div","chip", new Date(START).toLocaleDateString("it-IT",{day:"numeric",month:"long",year:"numeric"})));
+  chat.append(el("div","sys", `Registrazione avviata alle ${hms(START)} · ${D.msgs.length} messaggi trascritti`));
+}
+let prev = null, lastT = -1e9;
+for (const m of D.msgs) {
+  const first = m.who !== prev || m.t - lastT > 300;
+  const b = el("div","msg" + (first ? " first" : ""));
+  if (first) { const w = el("div","who", m.who); w.style.color = `var(${D.people[m.who]})`; b.append(w); }
+  const meta = el("span","meta");
+  if (START) meta.append(el("span", null, off(m.t) + " · "), hm(START + m.t*1000)); else meta.append(off(m.t));
+  const t = el("div","txt"); t.append(meta, document.createTextNode(m.text));
+  b.append(t); chat.append(b); prev = m.who; lastT = m.t;
+}
+const counts = {}; D.msgs.forEach(m => counts[m.who] = (counts[m.who]||0) + 1);
+const lg = el("div","legend");
+for (const [p,c] of Object.entries(D.people)) { const s = el("span"); const n = el("b", null, p); n.style.color = `var(${c})`; s.append(n, ` ${counts[p]||0} msg`); lg.append(s); }
+chat.append(lg);
+</script></body></html>
+"""
+
+
+def write_html(path, info, msgs, speakers):
+    data = {
+        "title": info["title"],
+        "start": info["start"].isoformat() if info["start"] else None,
+        "people": {s: PALETTE[i % len(PALETTE)] for i, s in enumerate(speakers)},
+        "msgs": msgs,
+    }
+    js = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    out = TEMPLATE.replace("__TITLE__", html.escape(info["title"])).replace("__DATA__", js)
+    open(path, "w", encoding="utf-8").write(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Registrazione Craig → chat in stile WhatsApp")
+    ap.add_argument("input", help="cartella o file .zip scaricato da Craig")
+    ap.add_argument("-o", "--out", help="cartella di uscita (default: la cartella di input, o accanto allo zip)")
+    ap.add_argument("--model", default="large-v3", help="modello Whisper: tiny, base, small, medium, large-v3 (default)")
+    ap.add_argument("--lang", default="it", help="lingua parlata (default: it)")
+    ap.add_argument("--rename", action="append", default=[], metavar="VECCHIO=NUOVO", help="rinomina un parlante")
+    ap.add_argument("--skip", action="append", default=[], metavar="NOME", help="ignora una traccia (es. un bot musicale)")
+    ap.add_argument("--threads", type=int, default=os.cpu_count() or 4)
+    a = ap.parse_args()
+
+    tmp = None
+    folder = a.input
+    if zipfile.is_zipfile(a.input):
+        tmp = tempfile.TemporaryDirectory(prefix="craig2chat-")
+        with zipfile.ZipFile(a.input) as z:
+            z.extractall(tmp.name)
+        folder = tmp.name
+        default_out = os.path.splitext(os.path.abspath(a.input))[0] + "-chat"
+    elif os.path.isdir(a.input):
+        default_out = a.input
+    else:
+        sys.exit(f"errore: {a.input} non è né una cartella né uno zip")
+
+    renames = dict(r.split("=", 1) for r in a.rename)
+    files = []
+    for root, _, names in os.walk(folder):
+        for n in sorted(names):
+            if os.path.splitext(n)[1].lower() in AUDIO_EXT:
+                who = speaker_name(n)
+                if who in a.skip:
+                    continue
+                files.append((os.path.join(root, n), renames.get(who, who)))
+    if not files:
+        sys.exit(f"errore: nessuna traccia audio trovata in {a.input}")
+
+    info = read_info(folder)
+    print(f"{len(files)} tracce, modello {a.model}", file=sys.stderr)
+    msgs = build_messages(transcribe(files, a.model, a.lang, a.threads))
+
+    out = a.out or default_out
+    os.makedirs(out, exist_ok=True)
+    speakers = list(dict.fromkeys(w for _, w in files))
+    write_html(os.path.join(out, "chat.html"), info, msgs, speakers)
+    write_txt(os.path.join(out, "chat.txt"), info, msgs)
+    print(f"fatto: {os.path.join(out, 'chat.html')}\n       {os.path.join(out, 'chat.txt')}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
